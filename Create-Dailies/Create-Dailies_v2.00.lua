@@ -2085,51 +2085,32 @@ local win = disp:AddWindow({
                     Checked = true
                 },
 
-                -- Audio Track Configuration (shown when SyncAudio is enabled)
-                ui:VGroup{
-                    ID = "AudioTrackConfig",
+                -- Audio Track Configuration
+                ui:VGap(5),
+                ui:HGroup{
                     Weight = 0,
-
-                    ui:VGap(5),
                     ui:Label{
                         Weight = 0,
-                        Text = "Audio Track Configuration:",
-                        Font = ui:Font{PixelSize = 11, StyleName = "Bold"},
+                        Text = "Audio Tracks:",
+                        MinimumSize = {100, 24}
                     },
-                    ui:HGroup{
-                        Weight = 0,
-                        ui:RadioButton{
-                            ID = "AudioAllMono",
-                            Text = "All channels as separate mono tracks (up to 16)",
-                            Checked = true
-                        }
-                    },
-                    ui:HGroup{
-                        Weight = 0,
-                        ui:RadioButton{
-                            ID = "AudioSingleChannel",
-                            Text = "Single channel only:",
-                            Checked = false
-                        },
-                        ui:SpinBox{
-                            ID = "AudioChannelSelect",
-                            Value = 1,
-                            Minimum = 1,
-                            Maximum = 16,
-                            Enabled = false,
-                            MinimumSize = {60, 24}
-                        },
-                        ui:Label{
-                            Weight = 1,
-                            Text = "(select which mono track to include)",
-                            StyleSheet = "QLabel { color: #888; font-size: 10px; }"
-                        }
+                    ui:ComboBox{
+                        ID = "AudioTrackMode",
+                        Weight = 0.5,
+                        MinimumSize = {250, 24}
                     },
                     ui:Label{
                         Weight = 0,
-                        Text = "Note: For single channel, you may need to configure source channel mapping in Resolve's clip audio attributes.",
-                        StyleSheet = "QLabel { color: #666; font-size: 10px; font-style: italic; }",
-                        WordWrap = true
+                        Text = "Channel:",
+                        MinimumSize = {60, 24}
+                    },
+                    ui:SpinBox{
+                        ID = "AudioChannelSelect",
+                        Value = 1,
+                        Minimum = 1,
+                        Maximum = 16,
+                        Enabled = false,
+                        MinimumSize = {60, 24}
                     }
                 },
 
@@ -2591,13 +2572,10 @@ function win.On.BrowseAudioBtn.Clicked(ev)
     end
 end
 
--- Audio track configuration radio button handlers
-function win.On.AudioAllMono.Clicked(ev)
-    itm.AudioChannelSelect.Enabled = false
-end
-
-function win.On.AudioSingleChannel.Clicked(ev)
-    itm.AudioChannelSelect.Enabled = true
+-- Audio track configuration ComboBox handler
+function win.On.AudioTrackMode.CurrentIndexChanged(ev)
+    -- Enable channel selector only when "Single channel only" is selected (index 1)
+    itm.AudioChannelSelect.Enabled = (ev.Index == 1)
 end
 
 function win.On.BrowseAudioDailiesBtn.Clicked(ev)
@@ -2698,10 +2676,10 @@ function win.On.CreateBtn.Clicked(ev)
     local audioPath = itm.AudioPath.Text
     local syncAudio = itm.SyncAudio.Checked
 
-    -- Audio track settings
+    -- Audio track settings (ComboBox index: 0 = All mono, 1 = Single channel)
     local audioTrackSettings = {
-        allMonoTracks = itm.AudioAllMono.Checked,
-        singleChannel = itm.AudioSingleChannel.Checked,
+        allMonoTracks = (itm.AudioTrackMode.CurrentIndex == 0),
+        singleChannel = (itm.AudioTrackMode.CurrentIndex == 1),
         channelNumber = itm.AudioChannelSelect.Value
     }
 
@@ -2869,6 +2847,12 @@ end
 -- ============================================================================
 
 updateCameraRollsList()
+
+-- Initialize Audio Track Mode ComboBox
+itm.AudioTrackMode:AddItem("All channels as separate mono tracks")
+itm.AudioTrackMode:AddItem("Single channel only")
+itm.AudioTrackMode.CurrentIndex = 0  -- Default to "All channels"
+
 win:Show()
 disp:RunLoop()
 win:Hide()
