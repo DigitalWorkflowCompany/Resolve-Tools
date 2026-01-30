@@ -1625,8 +1625,9 @@ end
 -- @param audioPath string|nil Path to audio directory (optional)
 -- @param syncAudio boolean Whether to sync audio to video using timecode
 -- @param audioTrackSettings table Audio track configuration {allMonoTracks, selectedChannels}
+-- @param masterTimelineSettings table Master timeline configuration (optional)
 -- @return boolean True if all rolls processed successfully
-local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTrackSettings)
+local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTrackSettings, masterTimelineSettings)
     print("=== DaVinci Resolve - Create Dailies v2.00 ===")
 
     local resolve = Resolve()
@@ -1984,6 +1985,81 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTr
         end
     end
 
+    -- Create master timelines if requested
+    if masterTimelineSettings and (masterTimelineSettings.createEditorial or masterTimelineSettings.createDailies) then
+        print("\n" .. string.rep("=", 70))
+        print("=== CREATING MASTER TIMELINES ===")
+        print(string.rep("=", 70))
+
+        -- Collect all clips from all camera roll timelines
+        local allClips = {}
+        local rootFolder = mediaPool:GetRootFolder()
+        local ocfFolder = findSubFolderByName(rootFolder, "OCF")
+
+        if ocfFolder then
+            local cameraFolders = ocfFolder:GetSubFolderList()
+            if cameraFolders then
+                for _, camFolder in ipairs(cameraFolders) do
+                    local rollFolders = camFolder:GetSubFolderList()
+                    if rollFolders then
+                        for _, rollFolder in ipairs(rollFolders) do
+                            local clips = rollFolder:GetClipList()
+                            if clips then
+                                for _, clip in ipairs(clips) do
+                                    table.insert(allClips, clip)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        print("Collected " .. #allClips .. " clips for master timelines")
+
+        -- Sort clips by start timecode
+        table.sort(allClips, function(a, b)
+            local tcA = a:GetClipProperty("Start TC") or "00:00:00:00"
+            local tcB = b:GetClipProperty("Start TC") or "00:00:00:00"
+            return timecodeToFrames(tcA, 24) < timecodeToFrames(tcB, 24)
+        end)
+
+        -- Create MasterTimeline_Editorial
+        if masterTimelineSettings.createEditorial and #allClips > 0 then
+            print("\nCreating MasterTimeline_Editorial...")
+            local editorialRoll = {
+                binName = "MasterTimeline_Editorial",
+                timelineName = "MasterTimeline_Editorial",
+                drxPath = cameraRolls[1] and cameraRolls[1].drxPath or ""
+            }
+            createTimelineFromSyncedClips(editorialRoll, allClips, resolve, project, mediaPool, cdlPath, masterTimelineSettings.editorialAudio)
+        end
+
+        -- Create MasterTimeline_Dailies
+        if masterTimelineSettings.createDailies and #allClips > 0 then
+            print("\nCreating MasterTimeline_Dailies...")
+            local dailiesRoll = {
+                binName = "MasterTimeline_Dailies",
+                timelineName = "MasterTimeline_Dailies",
+                drxPath = cameraRolls[1] and cameraRolls[1].drxPath or ""
+            }
+            createTimelineFromSyncedClips(dailiesRoll, allClips, resolve, project, mediaPool, cdlPath, masterTimelineSettings.dailiesAudio)
+        end
+    end
+
+    -- Delete Sync bin if it exists (cleanup)
+    local rootFolder = mediaPool:GetRootFolder()
+    local syncFolder = findSubFolderByName(rootFolder, "Sync")
+    if syncFolder then
+        print("\nCleaning up Sync bin...")
+        local deleted = mediaPool:DeleteFolders({syncFolder})
+        if deleted then
+            print("Deleted Sync bin")
+        else
+            print("Warning: Could not delete Sync bin")
+        end
+    end
+
     -- Print summary
     print("\n" .. string.rep("=", 70))
     print("=== CREATE DAILIES SUMMARY ===")
@@ -1991,6 +2067,14 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTr
     print("Camera rolls processed: " .. #cameraRolls)
     print("Successful: " .. successCount)
     print("Failed: " .. failCount)
+    if masterTimelineSettings then
+        if masterTimelineSettings.createEditorial then
+            print("Master timeline created: MasterTimeline_Editorial")
+        end
+        if masterTimelineSettings.createDailies then
+            print("Master timeline created: MasterTimeline_Dailies")
+        end
+    end
 
     return failCount == 0
 end
@@ -2033,74 +2117,14 @@ local win = disp:AddWindow({
                 },
                 ui:VGap(5),
 
-                ui:Label{
-                    Weight = 0,
-                    Text = "Camera Roll Path:",
-                },
-                ui:HGroup{
-                    Weight = 0,
-                    ui:LineEdit{
-                        ID = "NewRollPath",
-                        Text = "",
-                        PlaceholderText = "/path/to/camera/roll",
-                        Weight = 1
-                    },
-                    ui:Button{
-                        ID = "BrowseNewRollBtn",
-                        Text = "Browse...",
-                        Weight = 0,
-                        MinimumSize = {80, 28}
-                    }
-                },
-                ui:VGap(5),
-
-                ui:Label{
-                    Weight = 0,
-                    Text = "Bin & Timeline Name (e.g., A001):",
-                },
-                ui:LineEdit{
-                    ID = "BaseName",
-                    Text = "",
-                    PlaceholderText = "e.g., A001",
-                    Weight = 0
-                },
-                ui:VGap(5),
-
-                ui:Label{
-                    Weight = 0,
-                    Text = "DRX Grade File (Optional):",
-                },
-                ui:HGroup{
-                    Weight = 0,
-                    ui:LineEdit{
-                        ID = "NewRollDRX",
-                        Text = "",
-                        PlaceholderText = "/path/to/grade.drx",
-                        Weight = 1
-                    },
-                    ui:Button{
-                        ID = "BrowseNewDRXBtn",
-                        Text = "Browse DRX...",
-                        Weight = 0,
-                        MinimumSize = {110, 28}
-                    }
-                },
-                ui:VGap(5),
                 ui:HGroup{
                     Weight = 0,
                     ui:HGap(0, 1),
                     ui:Button{
-                        ID = "AddRollBtn",
-                        Text = "Add Camera Roll",
-                        Weight = 0,
-                        MinimumSize = {150, 28}
-                    },
-                    ui:HGap(10),
-                    ui:Button{
                         ID = "QuickAddCameraBtn",
-                        Text = "Add Multiple Camera Rolls",
+                        Text = "Add Camera Rolls",
                         Weight = 0,
-                        MinimumSize = {200, 28}
+                        MinimumSize = {200, 32}
                     },
                     ui:HGap(0, 1)
                 },
@@ -2211,6 +2235,78 @@ local win = disp:AddWindow({
                         PlaceholderText = "e.g., 1,2,5-8",
                         Weight = 0.3,
                         MinimumSize = {120, 24},
+                        Visible = false
+                    }
+                },
+
+                -- Master Timeline Configuration
+                ui:VGap(10),
+                ui:Label{
+                    Weight = 0,
+                    Text = "Master Timelines (Optional):",
+                    Font = ui:Font{PixelSize = 12, StyleName = "Bold"},
+                },
+
+                -- Editorial Master Timeline
+                ui:HGroup{
+                    Weight = 0,
+                    ui:CheckBox{
+                        ID = "CreateEditorialMaster",
+                        Text = "Create MasterTimeline_Editorial",
+                        Checked = false,
+                        MinimumSize = {250, 24}
+                    },
+                    ui:Label{
+                        ID = "EditorialAudioLabel",
+                        Weight = 0,
+                        Text = "Audio:",
+                        MinimumSize = {50, 24},
+                        Visible = false
+                    },
+                    ui:ComboBox{
+                        ID = "EditorialAudioMode",
+                        Weight = 0.3,
+                        MinimumSize = {180, 24},
+                        Visible = false
+                    },
+                    ui:LineEdit{
+                        ID = "EditorialChannels",
+                        Text = "1,2",
+                        PlaceholderText = "e.g., 1,2",
+                        Weight = 0.2,
+                        MinimumSize = {80, 24},
+                        Visible = false
+                    }
+                },
+
+                -- Dailies Master Timeline
+                ui:HGroup{
+                    Weight = 0,
+                    ui:CheckBox{
+                        ID = "CreateDailiesMaster",
+                        Text = "Create MasterTimeline_Dailies",
+                        Checked = false,
+                        MinimumSize = {250, 24}
+                    },
+                    ui:Label{
+                        ID = "DailiesAudioLabel",
+                        Weight = 0,
+                        Text = "Audio:",
+                        MinimumSize = {50, 24},
+                        Visible = false
+                    },
+                    ui:ComboBox{
+                        ID = "DailiesAudioMode",
+                        Weight = 0.3,
+                        MinimumSize = {180, 24},
+                        Visible = false
+                    },
+                    ui:LineEdit{
+                        ID = "DailiesChannels",
+                        Text = "1,2",
+                        PlaceholderText = "e.g., 1,2",
+                        Weight = 0.2,
+                        MinimumSize = {80, 24},
                         Visible = false
                     }
                 },
@@ -2652,20 +2748,6 @@ function win.On.CancelBtn.Clicked(ev)
     disp:ExitLoop()
 end
 
-function win.On.BrowseNewRollBtn.Clicked(ev)
-    local selectedPath = fu:RequestDir("Select Camera Roll Folder")
-    if selectedPath then
-        itm.NewRollPath.Text = selectedPath
-    end
-end
-
-function win.On.BrowseNewDRXBtn.Clicked(ev)
-    local selectedDRX = fu:RequestFile("Select DRX Grade File")
-    if selectedDRX then
-        itm.NewRollDRX.Text = selectedDRX
-    end
-end
-
 function win.On.BrowseAudioBtn.Clicked(ev)
     local selectedPath = fu:RequestDir("Select Audio Directory")
     if selectedPath then
@@ -2679,6 +2761,31 @@ function win.On.AudioTrackMode.CurrentIndexChanged(ev)
     local showChannels = (ev.Index == 1)
     itm.AudioChannelsLabel.Visible = showChannels
     itm.AudioChannelSelect.Visible = showChannels
+end
+
+-- Master Timeline checkbox handlers
+function win.On.CreateEditorialMaster.Clicked(ev)
+    local show = itm.CreateEditorialMaster.Checked
+    itm.EditorialAudioLabel.Visible = show
+    itm.EditorialAudioMode.Visible = show
+    -- Show channels field only if "User selected" mode
+    itm.EditorialChannels.Visible = show and (itm.EditorialAudioMode.CurrentIndex == 1)
+end
+
+function win.On.CreateDailiesMaster.Clicked(ev)
+    local show = itm.CreateDailiesMaster.Checked
+    itm.DailiesAudioLabel.Visible = show
+    itm.DailiesAudioMode.Visible = show
+    -- Show channels field only if "User selected" mode
+    itm.DailiesChannels.Visible = show and (itm.DailiesAudioMode.CurrentIndex == 1)
+end
+
+function win.On.EditorialAudioMode.CurrentIndexChanged(ev)
+    itm.EditorialChannels.Visible = itm.CreateEditorialMaster.Checked and (ev.Index == 1)
+end
+
+function win.On.DailiesAudioMode.CurrentIndexChanged(ev)
+    itm.DailiesChannels.Visible = itm.CreateDailiesMaster.Checked and (ev.Index == 1)
 end
 
 function win.On.BrowseAudioDailiesBtn.Clicked(ev)
@@ -2701,8 +2808,20 @@ function win.On.QuickAddCameraBtn.Clicked(ev)
         return
     end
 
-    local drxPath = fu:RequestFile("Select DRX Grade File (Optional - Cancel to Skip)")
+    print("\n" .. string.rep("=", 50))
+    print("Detected " .. #detectedRolls .. " camera rolls")
+    print("Now select a DRX grade file to apply to all rolls")
+    print("(Press Cancel/Escape to skip DRX grading)")
+    print(string.rep("=", 50))
+
+    local drxPath = fu:RequestFile("Select DRX Grade File for ALL Rolls (Cancel to Skip)")
     local drxPathStr = drxPath or ""
+
+    if drxPathStr ~= "" then
+        print("DRX selected: " .. drxPathStr)
+    else
+        print("No DRX file selected - skipping grade application")
+    end
 
     for _, roll in ipairs(detectedRolls) do
         table.insert(cameraRolls, {
@@ -2713,36 +2832,7 @@ function win.On.QuickAddCameraBtn.Clicked(ev)
         })
     end
 
-    print("Added " .. #detectedRolls .. " camera rolls")
-    updateCameraRollsList()
-end
-
-function win.On.AddRollBtn.Clicked(ev)
-    local baseName = itm.BaseName.Text
-    local rollPath = itm.NewRollPath.Text
-    local drxPath = itm.NewRollDRX.Text
-
-    if not baseName or baseName == "" then
-        print("Error: Bin & Timeline Name is required")
-        return
-    end
-
-    if not rollPath or rollPath == "" then
-        print("Error: Camera roll path is required")
-        return
-    end
-
-    table.insert(cameraRolls, {
-        clipPath = rollPath,
-        binName = baseName,
-        timelineName = baseName,
-        drxPath = drxPath or ""
-    })
-
-    itm.BaseName.Text = ""
-    itm.NewRollPath.Text = ""
-    itm.NewRollDRX.Text = ""
-
+    print("Added " .. #detectedRolls .. " camera rolls to list")
     updateCameraRollsList()
 end
 
@@ -2796,6 +2886,30 @@ function win.On.CreateBtn.Clicked(ev)
         print("Selected channels: " .. table.concat(audioTrackSettings.selectedChannels, ", "))
     end
 
+    -- Master timeline settings
+    local masterTimelineSettings = {
+        createEditorial = itm.CreateEditorialMaster.Checked,
+        createDailies = itm.CreateDailiesMaster.Checked,
+        editorialAudio = {
+            allMonoTracks = (itm.EditorialAudioMode.CurrentIndex == 0),
+            selectedChannels = {}
+        },
+        dailiesAudio = {
+            allMonoTracks = (itm.DailiesAudioMode.CurrentIndex == 0),
+            selectedChannels = {}
+        }
+    }
+
+    -- Parse Editorial audio channels if needed
+    if masterTimelineSettings.createEditorial and itm.EditorialAudioMode.CurrentIndex == 1 then
+        masterTimelineSettings.editorialAudio.selectedChannels = parseChannelSelection(itm.EditorialChannels.Text, 16)
+    end
+
+    -- Parse Dailies audio channels if needed
+    if masterTimelineSettings.createDailies and itm.DailiesAudioMode.CurrentIndex == 1 then
+        masterTimelineSettings.dailiesAudio.selectedChannels = parseChannelSelection(itm.DailiesChannels.Text, 16)
+    end
+
     if #cameraRolls == 0 then
         print("Error: Please add at least one camera roll")
         return
@@ -2811,7 +2925,7 @@ function win.On.CreateBtn.Clicked(ev)
         end
     end
 
-    local success = createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTrackSettings)
+    local success = createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTrackSettings, masterTimelineSettings)
 
     if success then
         print("\n=== Create Dailies completed successfully ===")
@@ -2969,6 +3083,15 @@ itm.AudioTrackMode.CurrentIndex = 0  -- Default to "All channels"
 -- Initialize channel selector visibility (hidden by default for "All channels" mode)
 itm.AudioChannelsLabel.Visible = false
 itm.AudioChannelSelect.Visible = false
+
+-- Initialize Master Timeline Audio Mode ComboBoxes
+itm.EditorialAudioMode:AddItem("All channels as separate mono tracks")
+itm.EditorialAudioMode:AddItem("User selected channels")
+itm.EditorialAudioMode.CurrentIndex = 0
+
+itm.DailiesAudioMode:AddItem("All channels as separate mono tracks")
+itm.DailiesAudioMode:AddItem("User selected channels")
+itm.DailiesAudioMode.CurrentIndex = 0
 
 win:Show()
 disp:RunLoop()
