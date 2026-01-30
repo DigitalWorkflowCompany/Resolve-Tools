@@ -1416,21 +1416,6 @@ local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, p
 
     project:SetCurrentTimeline(newTimeline)
 
-    -- Delete the default stereo audio track (track 1) that CreateEmptyTimeline creates
-    local defaultAudioTrackCount = newTimeline:GetTrackCount("audio")
-    if defaultAudioTrackCount > 0 then
-        local defaultTrackType = newTimeline:GetTrackSubType("audio", 1)
-        print("  Default audio track type: " .. (defaultTrackType or "unknown"))
-        if defaultTrackType and defaultTrackType ~= "mono" then
-            local deleted = newTimeline:DeleteTrack("audio", 1)
-            if deleted then
-                print("  Deleted default stereo audio track")
-            else
-                print("  Warning: Could not delete default audio track")
-            end
-        end
-    end
-
     -- Determine which audio tracks to create based on settings
     local numAudioTracks = 1
     local selectedChannels = {}
@@ -1441,37 +1426,72 @@ local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, p
         for i = 1, maxAudioChannels do
             table.insert(selectedChannels, i)
         end
-        print("  Adding " .. numAudioTracks .. " mono audio tracks (all channels)")
+        print("  Will create " .. numAudioTracks .. " mono audio tracks (all channels)")
     elseif audioTrackSettings.selectedChannels and #audioTrackSettings.selectedChannels > 0 then
         -- User-selected channels
         selectedChannels = audioTrackSettings.selectedChannels
         numAudioTracks = #selectedChannels
         local channelList = table.concat(selectedChannels, ", ")
-        print("  Adding " .. numAudioTracks .. " mono audio tracks (channels: " .. channelList .. ")")
+        print("  Will create " .. numAudioTracks .. " mono audio tracks (channels: " .. channelList .. ")")
     else
         -- Fallback: just channel 1
         numAudioTracks = 1
         selectedChannels = {1}
-        print("  Adding 1 mono audio track (channel 1)")
+        print("  Will create 1 mono audio track (channel 1)")
     end
 
-    -- Add the required number of mono tracks
-    for i = 1, numAudioTracks do
-        local trackAdded = newTimeline:AddTrack("audio", "mono")
-        if trackAdded then
-            print("    Added mono audio track " .. i .. " (for channel " .. selectedChannels[i] .. ")")
+    -- Strategy: Replace default stereo track with mono tracks BEFORE appending clips
+    -- CreateEmptyTimeline creates a default stereo track at index 1
+
+    print("  Configuring audio tracks...")
+
+    -- Step 1: Add first mono track at index 1 (pushes stereo to index 2)
+    local firstTrackAdded = newTimeline:AddTrack("audio", {audioType = "mono", index = 1})
+    if firstTrackAdded then
+        print("    Inserted mono track at index 1")
+    else
+        -- Fallback: add normally
+        newTimeline:AddTrack("audio", "mono")
+        print("    Added mono track (fallback method)")
+    end
+
+    -- Step 2: Delete the stereo track (now at index 2)
+    local audioTrackCount = newTimeline:GetTrackCount("audio")
+    if audioTrackCount >= 2 then
+        local track2Type = newTimeline:GetTrackSubType("audio", 2)
+        print("    Track 2 type: " .. (track2Type or "unknown"))
+        if track2Type and track2Type ~= "mono" then
+            local deleted = newTimeline:DeleteTrack("audio", 2)
+            if deleted then
+                print("    Deleted stereo track at index 2")
+            else
+                print("    Warning: Could not delete stereo track")
+            end
         end
     end
 
-    -- Append clips to timeline
-    print("  Appending " .. #matchingClips .. " clips to timeline...")
+    -- Step 3: Add remaining mono tracks
+    for i = 2, numAudioTracks do
+        local trackAdded = newTimeline:AddTrack("audio", "mono")
+        if trackAdded then
+            print("    Added mono track " .. i .. " (for channel " .. selectedChannels[i] .. ")")
+        end
+    end
 
-    -- Use AppendToTimeline with clip info for better control
+    -- Verify track configuration before appending clips
+    audioTrackCount = newTimeline:GetTrackCount("audio")
+    print("  Audio tracks configured: " .. audioTrackCount)
+    for i = 1, math.min(audioTrackCount, 3) do
+        local trackType = newTimeline:GetTrackSubType("audio", i)
+        print("    Track " .. i .. ": " .. (trackType or "unknown"))
+    end
+
+    -- Step 4: Append clips to timeline
+    print("  Appending " .. #matchingClips .. " clips to timeline...")
     local appendResult = mediaPool:AppendToTimeline(matchingClips)
 
     if not appendResult or #appendResult == 0 then
         print("Warning: AppendToTimeline returned no items, trying alternative method...")
-        -- Fallback: append clips individually
         for _, clip in ipairs(matchingClips) do
             mediaPool:AppendToTimeline({clip})
         end
