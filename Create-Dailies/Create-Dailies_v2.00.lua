@@ -1330,13 +1330,19 @@ local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, p
     local drxPath = cameraRoll.drxPath
 
     -- Default audio track settings if not provided
-    audioTrackSettings = audioTrackSettings or { allMonoTracks = true, singleChannel = false, channelNumber = 1 }
+    audioTrackSettings = audioTrackSettings or { allMonoTracks = true, selectedChannels = {} }
 
     print("\n=== Creating Timeline for: " .. binName .. " ===")
     print("  Timeline name: " .. (timelineName or "nil"))
     print("  DRX path: " .. (drxPath or "none"))
     print("  Input clips: " .. #syncedClips)
-    print("  Audio tracks: " .. (audioTrackSettings.allMonoTracks and "All mono" or ("Single channel " .. audioTrackSettings.channelNumber)))
+
+    -- Build audio tracks description for logging
+    local audioTrackDesc = "All mono"
+    if not audioTrackSettings.allMonoTracks and audioTrackSettings.selectedChannels and #audioTrackSettings.selectedChannels > 0 then
+        audioTrackDesc = "Selected channels: " .. table.concat(audioTrackSettings.selectedChannels, ", ")
+    end
+    print("  Audio tracks: " .. audioTrackDesc)
 
     -- Find synced clips that match this roll's clips
     -- Synced clips should have names like "A001C001..." matching the original clips
@@ -1598,7 +1604,7 @@ end
 -- @param cdlPath string|nil Path to CDL file (optional)
 -- @param audioPath string|nil Path to audio directory (optional)
 -- @param syncAudio boolean Whether to sync audio to video using timecode
--- @param audioTrackSettings table Audio track configuration {allMonoTracks, singleChannel, channelNumber}
+-- @param audioTrackSettings table Audio track configuration {allMonoTracks, selectedChannels}
 -- @return boolean True if all rolls processed successfully
 local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTrackSettings)
     print("=== DaVinci Resolve - Create Dailies v2.00 ===")
