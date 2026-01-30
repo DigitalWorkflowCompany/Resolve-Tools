@@ -20,6 +20,9 @@ Enhanced dailies creation script with tabbed interface supporting three workflow
 - Extracts and applies metadata from CCC files (Episode, Scene, Shot, Take, Camera) to Resolve metadata columns
 - Searches for and applies LUTs referenced in CCC files
 - Audio sync: Imports audio files and syncs to video using timecode matching
+- Audio track configuration: Supports mono multi-track audio (up to 16 channels)
+  - "All channels as mono tracks" - creates separate mono track for each channel
+  - "Single channel only" - creates one mono track with user-selected channel
 
 **Tab 2: OCF Master Timeline** (New in v2.00)
 - Collects all clips from OCF/*/\* bins
@@ -85,6 +88,8 @@ local disp = bmd.UIDispatcher(ui)
 - Get clip metadata: `clip:GetClipProperty("Start TC")`, `clip:GetClipProperty("FPS")`
 - Set clip metadata: `mediaPoolItem:SetMetadata("Episode #", value)` - field names must match Resolve UI labels exactly (e.g., "Episode #", "Scene", "Shot", "Take", "Camera #")
 - Get MediaPoolItem from timeline clip: `timelineItem:GetMediaPoolItem()`
+- Add mono audio track: `timeline:AddTrack("audio", "mono")` - subTrackType can be "mono", "stereo", "5.1", "7.1", etc.
+- Create empty timeline: `mediaPool:CreateEmptyTimeline(timelineName)` - use with AddTrack for custom track configuration
 
 ## Development Notes
 

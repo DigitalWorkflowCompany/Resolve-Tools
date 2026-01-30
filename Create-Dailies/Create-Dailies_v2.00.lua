@@ -1278,15 +1278,19 @@ end
 -- @param mediaPool MediaPool The media pool object
 -- @param cdlPath string|nil Path to CDL file (optional)
 -- @return boolean True if timeline was created successfully
-local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath)
+local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath, audioTrackSettings)
     local binName = cameraRoll.binName
     local timelineName = cameraRoll.timelineName
     local drxPath = cameraRoll.drxPath
+
+    -- Default audio track settings if not provided
+    audioTrackSettings = audioTrackSettings or { allMonoTracks = true, singleChannel = false, channelNumber = 1 }
 
     print("\n=== Creating Timeline for: " .. binName .. " ===")
     print("  Timeline name: " .. (timelineName or "nil"))
     print("  DRX path: " .. (drxPath or "none"))
     print("  Input clips: " .. #syncedClips)
+    print("  Audio tracks: " .. (audioTrackSettings.allMonoTracks and "All mono" or ("Single channel " .. audioTrackSettings.channelNumber)))
 
     -- Find synced clips that match this roll's clips
     -- Synced clips should have names like "A001C001..." matching the original clips
@@ -1335,25 +1339,65 @@ local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, p
         mediaPool:SetCurrentFolder(timelinesFolder)
     end
 
-    -- Create timeline
-    print("Creating timeline: " .. timelineName)
-    local newTimeline = mediaPool:CreateTimelineFromClips(timelineName, matchingClips)
-
-    if not newTimeline then
-        print("CreateTimelineFromClips failed, trying fallback...")
-        newTimeline = mediaPool:CreateEmptyTimeline(timelineName)
-        if newTimeline then
-            project:SetCurrentTimeline(newTimeline)
-            mediaPool:AppendToTimeline(matchingClips)
+    -- Determine audio channel count from first clip
+    local maxAudioChannels = 16  -- Default maximum
+    if #matchingClips > 0 then
+        local audioMapping = matchingClips[1]:GetAudioMapping()
+        if audioMapping then
+            -- Try to parse channel count from linked audio
+            local linkedChannels = audioMapping:match('"channels"%s*:%s*(%d+)')
+            if linkedChannels then
+                maxAudioChannels = math.min(tonumber(linkedChannels), 16)
+                print("  Detected " .. maxAudioChannels .. " audio channels from linked audio")
+            end
         end
     end
 
+    -- Create empty timeline with mono audio tracks
+    print("Creating timeline with mono audio tracks: " .. timelineName)
+    local newTimeline = mediaPool:CreateEmptyTimeline(timelineName)
+
     if not newTimeline then
-        print("Error: Failed to create timeline for " .. binName)
+        print("Error: Failed to create empty timeline for " .. binName)
         return false
     end
 
     project:SetCurrentTimeline(newTimeline)
+
+    -- Add mono audio tracks based on settings
+    local numAudioTracks = 1
+    if audioTrackSettings.allMonoTracks then
+        numAudioTracks = maxAudioChannels
+        print("  Adding " .. numAudioTracks .. " mono audio tracks")
+    else
+        numAudioTracks = 1
+        print("  Adding 1 mono audio track (channel " .. audioTrackSettings.channelNumber .. " selected)")
+    end
+
+    -- Timeline starts with 1 video track and 1 audio track (usually stereo)
+    -- We need to configure the audio tracks to be mono
+    -- First, add the required number of mono tracks
+    for i = 1, numAudioTracks do
+        local trackAdded = newTimeline:AddTrack("audio", "mono")
+        if trackAdded then
+            print("    Added mono audio track " .. i)
+        end
+    end
+
+    -- Append clips to timeline
+    print("  Appending " .. #matchingClips .. " clips to timeline...")
+
+    -- Use AppendToTimeline with clip info for better control
+    local appendResult = mediaPool:AppendToTimeline(matchingClips)
+
+    if not appendResult or #appendResult == 0 then
+        print("Warning: AppendToTimeline returned no items, trying alternative method...")
+        -- Fallback: append clips individually
+        for _, clip in ipairs(matchingClips) do
+            mediaPool:AppendToTimeline({clip})
+        end
+    end
+
     print("Created timeline: " .. timelineName)
 
     -- Get timeline items
@@ -1481,8 +1525,9 @@ end
 -- @param cdlPath string|nil Path to CDL file (optional)
 -- @param audioPath string|nil Path to audio directory (optional)
 -- @param syncAudio boolean Whether to sync audio to video using timecode
+-- @param audioTrackSettings table Audio track configuration {allMonoTracks, singleChannel, channelNumber}
 -- @return boolean True if all rolls processed successfully
-local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
+local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTrackSettings)
     print("=== DaVinci Resolve - Create Dailies v2.00 ===")
 
     local resolve = Resolve()
@@ -1717,7 +1762,7 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                                 -- Create timeline for each camera roll
                                 print("\nCreating timelines for " .. #cameraRolls .. " camera rolls...")
                                 for _, cameraRoll in ipairs(cameraRolls) do
-                                    createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath)
+                                    createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath, audioTrackSettings)
                                 end
                             else
                                 print("Warning: No synced clips found in Sync bin after moving originals")
@@ -1771,7 +1816,7 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                                             end
                                         end
                                         if #originalClips > 0 then
-                                            createTimelineFromSyncedClips(cameraRoll, originalClips, resolve, project, mediaPool, cdlPath)
+                                            createTimelineFromSyncedClips(cameraRoll, originalClips, resolve, project, mediaPool, cdlPath, audioTrackSettings)
                                         else
                                             print("Warning: No clips found for roll '" .. cameraRoll.binName .. "'")
                                         end
@@ -1828,7 +1873,7 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                                     end
                                 end
                                 if #originalClips > 0 then
-                                    createTimelineFromSyncedClips(cameraRoll, originalClips, resolve, project, mediaPool, cdlPath)
+                                    createTimelineFromSyncedClips(cameraRoll, originalClips, resolve, project, mediaPool, cdlPath, audioTrackSettings)
                                 end
                             end
 
@@ -2038,6 +2083,54 @@ local win = disp:AddWindow({
                     ID = "SyncAudio",
                     Text = "Auto-sync audio to video using timecode",
                     Checked = true
+                },
+
+                -- Audio Track Configuration (shown when SyncAudio is enabled)
+                ui:VGroup{
+                    ID = "AudioTrackConfig",
+                    Weight = 0,
+
+                    ui:VGap(5),
+                    ui:Label{
+                        Weight = 0,
+                        Text = "Audio Track Configuration:",
+                        Font = ui:Font{PixelSize = 11, StyleName = "Bold"},
+                    },
+                    ui:HGroup{
+                        Weight = 0,
+                        ui:RadioButton{
+                            ID = "AudioAllMono",
+                            Text = "All channels as separate mono tracks (up to 16)",
+                            Checked = true
+                        }
+                    },
+                    ui:HGroup{
+                        Weight = 0,
+                        ui:RadioButton{
+                            ID = "AudioSingleChannel",
+                            Text = "Single channel only:",
+                            Checked = false
+                        },
+                        ui:SpinBox{
+                            ID = "AudioChannelSelect",
+                            Value = 1,
+                            Minimum = 1,
+                            Maximum = 16,
+                            Enabled = false,
+                            MinimumSize = {60, 24}
+                        },
+                        ui:Label{
+                            Weight = 1,
+                            Text = "(select which mono track to include)",
+                            StyleSheet = "QLabel { color: #888; font-size: 10px; }"
+                        }
+                    },
+                    ui:Label{
+                        Weight = 0,
+                        Text = "Note: For single channel, you may need to configure source channel mapping in Resolve's clip audio attributes.",
+                        StyleSheet = "QLabel { color: #666; font-size: 10px; font-style: italic; }",
+                        WordWrap = true
+                    }
                 },
 
                 ui:VGap(10),
@@ -2498,6 +2591,15 @@ function win.On.BrowseAudioBtn.Clicked(ev)
     end
 end
 
+-- Audio track configuration radio button handlers
+function win.On.AudioAllMono.Clicked(ev)
+    itm.AudioChannelSelect.Enabled = false
+end
+
+function win.On.AudioSingleChannel.Clicked(ev)
+    itm.AudioChannelSelect.Enabled = true
+end
+
 function win.On.BrowseAudioDailiesBtn.Clicked(ev)
     local selectedPath = fu:RequestDir("Select Audio Source Directory")
     if selectedPath then
@@ -2596,6 +2698,13 @@ function win.On.CreateBtn.Clicked(ev)
     local audioPath = itm.AudioPath.Text
     local syncAudio = itm.SyncAudio.Checked
 
+    -- Audio track settings
+    local audioTrackSettings = {
+        allMonoTracks = itm.AudioAllMono.Checked,
+        singleChannel = itm.AudioSingleChannel.Checked,
+        channelNumber = itm.AudioChannelSelect.Value
+    }
+
     if #cameraRolls == 0 then
         print("Error: Please add at least one camera roll")
         return
@@ -2611,7 +2720,7 @@ function win.On.CreateBtn.Clicked(ev)
         end
     end
 
-    local success = createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
+    local success = createDailies(cameraRolls, cdlPath, audioPath, syncAudio, audioTrackSettings)
 
     if success then
         print("\n=== Create Dailies completed successfully ===")
