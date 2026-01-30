@@ -2829,7 +2829,79 @@ function win.On.QuickAddCameraBtn.Clicked(ev)
     print(string.rep("*", 60))
     print("")
 
-    local drxPath = fu:RequestFile(">>> SELECT DRX GRADE FILE FOR ALL ROLLS <<< (Cancel to Skip)")
+    -- Build roll list for display (show first 5, summarize rest)
+    local rollListText = ""
+    local maxDisplay = 5
+    for i, roll in ipairs(detectedRolls) do
+        if i <= maxDisplay then
+            rollListText = rollListText .. "  " .. roll.name .. "\n"
+        end
+    end
+    if #detectedRolls > maxDisplay then
+        rollListText = rollListText .. "  ... and " .. (#detectedRolls - maxDisplay) .. " more\n"
+    end
+
+    -- Create DRX selection prompt dialog
+    local drxPromptWin = disp:AddWindow({
+        ID = "DRXPromptDialog",
+        WindowTitle = "Select DRX Grade File",
+        Geometry = {100, 100, 420, 280},
+        WindowFlags = {Window = true, WindowStaysOnTopHint = true},
+        ui:VGroup{
+            ID = "root",
+            Spacing = 10,
+            ui:Label{
+                ID = "HeaderLabel",
+                Text = "Camera Rolls Detected: " .. #detectedRolls,
+                Alignment = {AlignHCenter = true},
+                Font = ui:Font{PixelSize = 16, Bold = true},
+            },
+            ui:Label{
+                ID = "RollListLabel",
+                Text = rollListText,
+                Alignment = {AlignLeft = true},
+            },
+            ui:Label{
+                ID = "InstructionLabel",
+                Text = "Next Step: Select a DRX grade file.\n\nThe grade will be applied to ALL clips\nacross all detected camera rolls.",
+                Alignment = {AlignHCenter = true},
+                WordWrap = true,
+            },
+            ui:HGroup{
+                Weight = 0,
+                ui:HGap(0, 1),
+                ui:Button{ID = "SkipBtn", Text = "Skip Grading"},
+                ui:Button{ID = "SelectDRXBtn", Text = "Select DRX File..."},
+            },
+        },
+    })
+
+    local drxPromptItm = drxPromptWin:GetItems()
+    local userWantsDRX = false
+
+    function drxPromptWin.On.SelectDRXBtn.Clicked(ev)
+        userWantsDRX = true
+        disp:ExitLoop()
+    end
+
+    function drxPromptWin.On.SkipBtn.Clicked(ev)
+        userWantsDRX = false
+        disp:ExitLoop()
+    end
+
+    function drxPromptWin.On.DRXPromptDialog.Close(ev)
+        userWantsDRX = false
+        disp:ExitLoop()
+    end
+
+    drxPromptWin:Show()
+    disp:RunLoop()
+    drxPromptWin:Hide()
+
+    local drxPath = nil
+    if userWantsDRX then
+        drxPath = fu:RequestFile("Select DRX Grade File (.drx)")
+    end
     local drxPathStr = drxPath or ""
 
     print("")
