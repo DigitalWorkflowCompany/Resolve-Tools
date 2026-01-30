@@ -101,6 +101,52 @@ local function findSubFolderByName(parentFolder, name)
     return nil
 end
 
+--- Parse a channel selection string into a list of channel numbers
+-- Supports formats like: "1,2,5,8" or "1-4,7,8" or "1,3-5,8"
+-- @param channelStr string The channel selection string
+-- @param maxChannels number Maximum valid channel number (default 16)
+-- @return table Array of channel numbers (sorted, unique)
+local function parseChannelSelection(channelStr, maxChannels)
+    maxChannels = maxChannels or 16
+    local channels = {}
+    local seen = {}
+
+    if not channelStr or channelStr == "" then
+        return channels
+    end
+
+    -- Split by comma
+    for part in channelStr:gmatch("[^,]+") do
+        part = part:match("^%s*(.-)%s*$")  -- Trim whitespace
+
+        -- Check for range (e.g., "1-4")
+        local rangeStart, rangeEnd = part:match("^(%d+)%s*%-%s*(%d+)$")
+        if rangeStart and rangeEnd then
+            rangeStart = tonumber(rangeStart)
+            rangeEnd = tonumber(rangeEnd)
+            if rangeStart and rangeEnd then
+                for ch = rangeStart, rangeEnd do
+                    if ch >= 1 and ch <= maxChannels and not seen[ch] then
+                        table.insert(channels, ch)
+                        seen[ch] = true
+                    end
+                end
+            end
+        else
+            -- Single number
+            local ch = tonumber(part)
+            if ch and ch >= 1 and ch <= maxChannels and not seen[ch] then
+                table.insert(channels, ch)
+                seen[ch] = true
+            end
+        end
+    end
+
+    -- Sort channels
+    table.sort(channels)
+    return channels
+end
+
 -- ============================================================================
 -- CCC/EDL PARSING FUNCTIONS
 -- ============================================================================
@@ -1364,23 +1410,50 @@ local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, p
 
     project:SetCurrentTimeline(newTimeline)
 
-    -- Add mono audio tracks based on settings
-    local numAudioTracks = 1
-    if audioTrackSettings.allMonoTracks then
-        numAudioTracks = maxAudioChannels
-        print("  Adding " .. numAudioTracks .. " mono audio tracks")
-    else
-        numAudioTracks = 1
-        print("  Adding 1 mono audio track (channel " .. audioTrackSettings.channelNumber .. " selected)")
+    -- Delete the default stereo audio track (track 1) that CreateEmptyTimeline creates
+    local defaultAudioTrackCount = newTimeline:GetTrackCount("audio")
+    if defaultAudioTrackCount > 0 then
+        local defaultTrackType = newTimeline:GetTrackSubType("audio", 1)
+        print("  Default audio track type: " .. (defaultTrackType or "unknown"))
+        if defaultTrackType and defaultTrackType ~= "mono" then
+            local deleted = newTimeline:DeleteTrack("audio", 1)
+            if deleted then
+                print("  Deleted default stereo audio track")
+            else
+                print("  Warning: Could not delete default audio track")
+            end
+        end
     end
 
-    -- Timeline starts with 1 video track and 1 audio track (usually stereo)
-    -- We need to configure the audio tracks to be mono
-    -- First, add the required number of mono tracks
+    -- Determine which audio tracks to create based on settings
+    local numAudioTracks = 1
+    local selectedChannels = {}
+
+    if audioTrackSettings.allMonoTracks then
+        -- All channels as separate mono tracks
+        numAudioTracks = maxAudioChannels
+        for i = 1, maxAudioChannels do
+            table.insert(selectedChannels, i)
+        end
+        print("  Adding " .. numAudioTracks .. " mono audio tracks (all channels)")
+    elseif audioTrackSettings.selectedChannels and #audioTrackSettings.selectedChannels > 0 then
+        -- User-selected channels
+        selectedChannels = audioTrackSettings.selectedChannels
+        numAudioTracks = #selectedChannels
+        local channelList = table.concat(selectedChannels, ", ")
+        print("  Adding " .. numAudioTracks .. " mono audio tracks (channels: " .. channelList .. ")")
+    else
+        -- Fallback: just channel 1
+        numAudioTracks = 1
+        selectedChannels = {1}
+        print("  Adding 1 mono audio track (channel 1)")
+    end
+
+    -- Add the required number of mono tracks
     for i = 1, numAudioTracks do
         local trackAdded = newTimeline:AddTrack("audio", "mono")
         if trackAdded then
-            print("    Added mono audio track " .. i)
+            print("    Added mono audio track " .. i .. " (for channel " .. selectedChannels[i] .. ")")
         end
     end
 
@@ -2096,21 +2169,23 @@ local win = disp:AddWindow({
                     },
                     ui:ComboBox{
                         ID = "AudioTrackMode",
-                        Weight = 0.5,
-                        MinimumSize = {250, 24}
+                        Weight = 0.4,
+                        MinimumSize = {220, 24}
                     },
                     ui:Label{
+                        ID = "AudioChannelsLabel",
                         Weight = 0,
-                        Text = "Channel:",
-                        MinimumSize = {60, 24}
+                        Text = "Channels:",
+                        MinimumSize = {65, 24},
+                        Visible = false
                     },
-                    ui:SpinBox{
+                    ui:LineEdit{
                         ID = "AudioChannelSelect",
-                        Value = 1,
-                        Minimum = 1,
-                        Maximum = 16,
-                        Enabled = false,
-                        MinimumSize = {60, 24}
+                        Text = "1,2",
+                        PlaceholderText = "e.g., 1,2,5-8",
+                        Weight = 0.3,
+                        MinimumSize = {120, 24},
+                        Visible = false
                     }
                 },
 
@@ -2574,8 +2649,10 @@ end
 
 -- Audio track configuration ComboBox handler
 function win.On.AudioTrackMode.CurrentIndexChanged(ev)
-    -- Enable channel selector only when "Single channel only" is selected (index 1)
-    itm.AudioChannelSelect.Enabled = (ev.Index == 1)
+    -- Show channel selector only when "User selected channels" is selected (index 1)
+    local showChannels = (ev.Index == 1)
+    itm.AudioChannelsLabel.Visible = showChannels
+    itm.AudioChannelSelect.Visible = showChannels
 end
 
 function win.On.BrowseAudioDailiesBtn.Clicked(ev)
@@ -2676,12 +2753,22 @@ function win.On.CreateBtn.Clicked(ev)
     local audioPath = itm.AudioPath.Text
     local syncAudio = itm.SyncAudio.Checked
 
-    -- Audio track settings (ComboBox index: 0 = All mono, 1 = Single channel)
+    -- Audio track settings (ComboBox index: 0 = All mono, 1 = User selected)
     local audioTrackSettings = {
         allMonoTracks = (itm.AudioTrackMode.CurrentIndex == 0),
-        singleChannel = (itm.AudioTrackMode.CurrentIndex == 1),
-        channelNumber = itm.AudioChannelSelect.Value
+        selectedChannels = {}  -- Will be populated if user selected mode
     }
+
+    -- Parse user-selected channels if in that mode
+    if itm.AudioTrackMode.CurrentIndex == 1 then
+        local channelStr = itm.AudioChannelSelect.Text
+        audioTrackSettings.selectedChannels = parseChannelSelection(channelStr, 16)
+        if #audioTrackSettings.selectedChannels == 0 then
+            print("Error: No valid channels specified. Use format like: 1,2,5-8")
+            return
+        end
+        print("Selected channels: " .. table.concat(audioTrackSettings.selectedChannels, ", "))
+    end
 
     if #cameraRolls == 0 then
         print("Error: Please add at least one camera roll")
@@ -2850,8 +2937,12 @@ updateCameraRollsList()
 
 -- Initialize Audio Track Mode ComboBox
 itm.AudioTrackMode:AddItem("All channels as separate mono tracks")
-itm.AudioTrackMode:AddItem("Single channel only")
+itm.AudioTrackMode:AddItem("User selected channels")
 itm.AudioTrackMode.CurrentIndex = 0  -- Default to "All channels"
+
+-- Initialize channel selector visibility (hidden by default for "All channels" mode)
+itm.AudioChannelsLabel.Visible = false
+itm.AudioChannelSelect.Visible = false
 
 win:Show()
 disp:RunLoop()
