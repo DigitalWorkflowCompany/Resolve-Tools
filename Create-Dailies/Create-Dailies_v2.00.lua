@@ -1284,22 +1284,33 @@ local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, p
     local drxPath = cameraRoll.drxPath
 
     print("\n=== Creating Timeline for: " .. binName .. " ===")
+    print("  Timeline name: " .. (timelineName or "nil"))
+    print("  DRX path: " .. (drxPath or "none"))
+    print("  Input clips: " .. #syncedClips)
 
     -- Find synced clips that match this roll's clips
     -- Synced clips should have names like "A001C001..." matching the original clips
     local rollPrefix = binName:match("^([A-Za-z]+%d+)") or binName
+    print("  Roll prefix for matching: '" .. rollPrefix .. "'")
+
     local matchingClips = {}
 
     for _, clip in ipairs(syncedClips) do
         local clipName = clip:GetName() or ""
-        -- Check if clip name starts with the roll prefix (e.g., A001)
+        -- Check if clip name contains the roll prefix (e.g., A001)
         if clipName:find(rollPrefix, 1, true) then
             table.insert(matchingClips, clip)
         end
     end
 
+    print("  Matching clips found: " .. #matchingClips)
+
     if #matchingClips == 0 then
-        print("Warning: No synced clips found matching roll " .. binName)
+        print("Warning: No clips found matching roll prefix '" .. rollPrefix .. "'")
+        print("Available clip names:")
+        for i, clip in ipairs(syncedClips) do
+            print("  " .. i .. ": " .. (clip:GetName() or "Unknown"))
+        end
         return false
     end
 
@@ -1691,37 +1702,81 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                             print("=== CREATING TIMELINES FROM SYNCED CLIPS ===")
                             print(string.rep("=", 70))
 
+                            -- After moving originals out, remaining clips in Sync bin are synced clips
                             local syncedClips = syncFolder:GetClipList()
+                            print("Clips remaining in Sync bin: " .. (syncedClips and #syncedClips or 0))
+
                             if syncedClips and #syncedClips > 0 then
-                                -- Filter to only include synced clips (not original clips)
-                                -- Synced clips typically have linked audio
-                                local actualSyncedClips = {}
-                                for _, clip in ipairs(syncedClips) do
-                                    local audioMapping = clip:GetAudioMapping()
-                                    if audioMapping then
-                                        local linkedAudio = audioMapping:match('"linked_audio"')
-                                        if linkedAudio then
-                                            table.insert(actualSyncedClips, clip)
+                                -- List all synced clips for debugging
+                                print("\nSynced clips found:")
+                                for i, clip in ipairs(syncedClips) do
+                                    local clipName = clip:GetName() or "Unknown"
+                                    print("  " .. i .. ": " .. clipName)
+                                end
+
+                                -- Create timeline for each camera roll
+                                print("\nCreating timelines for " .. #cameraRolls .. " camera rolls...")
+                                for _, cameraRoll in ipairs(cameraRolls) do
+                                    createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath)
+                                end
+                            else
+                                print("Warning: No synced clips found in Sync bin after moving originals")
+                                print("This may indicate audio sync modified clips in place (not creating new clips)")
+                                print("Creating timelines from clips in OCF bins (which now have synced audio)...")
+
+                                -- Fallback: create timelines from clips in OCF (which may now have synced audio)
+                                print("\nProcessing " .. #cameraRolls .. " camera rolls:")
+                                for i, cameraRoll in ipairs(cameraRolls) do
+                                    print("  Roll " .. i .. ": binName='" .. (cameraRoll.binName or "nil") .. "', timelineName='" .. (cameraRoll.timelineName or "nil") .. "'")
+                                end
+
+                                local ocfFolder = findSubFolderByName(rootFolder, "OCF")
+                                if not ocfFolder then
+                                    print("Error: OCF folder not found!")
+                                else
+                                    print("\nSearching OCF folder structure...")
+                                    local cameraFolders = ocfFolder:GetSubFolderList()
+                                    if cameraFolders then
+                                        print("Found " .. #cameraFolders .. " camera folders in OCF")
+                                        for _, camFolder in ipairs(cameraFolders) do
+                                            local camName = camFolder:GetName()
+                                            local rollFolders = camFolder:GetSubFolderList()
+                                            if rollFolders then
+                                                print("  " .. camName .. ": " .. #rollFolders .. " roll folders")
+                                                for _, rollFolder in ipairs(rollFolders) do
+                                                    local rollName = rollFolder:GetName()
+                                                    local clips = rollFolder:GetClipList() or {}
+                                                    print("    - " .. rollName .. ": " .. #clips .. " clips")
+                                                end
+                                            end
+                                        end
+                                    end
+
+                                    -- Now create timelines
+                                    for _, cameraRoll in ipairs(cameraRolls) do
+                                        local originalClips = {}
+                                        if cameraFolders then
+                                            for _, camFolder in ipairs(cameraFolders) do
+                                                local rollFolders = camFolder:GetSubFolderList()
+                                                if rollFolders then
+                                                    for _, rollFolder in ipairs(rollFolders) do
+                                                        if rollFolder:GetName() == cameraRoll.binName then
+                                                            originalClips = rollFolder:GetClipList() or {}
+                                                            print("\nFound " .. #originalClips .. " clips for roll '" .. cameraRoll.binName .. "'")
+                                                            break
+                                                        end
+                                                    end
+                                                end
+                                                if #originalClips > 0 then break end
+                                            end
+                                        end
+                                        if #originalClips > 0 then
+                                            createTimelineFromSyncedClips(cameraRoll, originalClips, resolve, project, mediaPool, cdlPath)
+                                        else
+                                            print("Warning: No clips found for roll '" .. cameraRoll.binName .. "'")
                                         end
                                     end
                                 end
-
-                                if #actualSyncedClips > 0 then
-                                    print("Found " .. #actualSyncedClips .. " synced clips")
-
-                                    -- Create timeline for each camera roll
-                                    for _, cameraRoll in ipairs(cameraRolls) do
-                                        createTimelineFromSyncedClips(cameraRoll, actualSyncedClips, resolve, project, mediaPool, cdlPath)
-                                    end
-                                else
-                                    print("Warning: No synced clips found with linked audio")
-                                    print("Using all clips from Sync bin...")
-                                    for _, cameraRoll in ipairs(cameraRolls) do
-                                        createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath)
-                                    end
-                                end
-                            else
-                                print("Warning: No clips found in Sync bin")
                             end
 
                             resolve:OpenPage("media")
@@ -1747,6 +1802,37 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                             if osfFolder then
                                 mediaPool:MoveClips(importedAudioClips, osfFolder)
                             end
+
+                            -- Still create timelines even though sync failed (without synced audio)
+                            print("\n" .. string.rep("=", 70))
+                            print("=== CREATING TIMELINES (WITHOUT SYNCED AUDIO) ===")
+                            print(string.rep("=", 70))
+
+                            for _, cameraRoll in ipairs(cameraRolls) do
+                                local originalClips = {}
+                                local ocfFolder = findSubFolderByName(rootFolder, "OCF")
+                                if ocfFolder then
+                                    local cameraFolders = ocfFolder:GetSubFolderList()
+                                    if cameraFolders then
+                                        for _, camFolder in ipairs(cameraFolders) do
+                                            local rollFolders = camFolder:GetSubFolderList()
+                                            if rollFolders then
+                                                for _, rollFolder in ipairs(rollFolders) do
+                                                    if rollFolder:GetName() == cameraRoll.binName then
+                                                        originalClips = rollFolder:GetClipList() or {}
+                                                        break
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                                if #originalClips > 0 then
+                                    createTimelineFromSyncedClips(cameraRoll, originalClips, resolve, project, mediaPool, cdlPath)
+                                end
+                            end
+
+                            resolve:OpenPage("media")
                         end
                     end
                 end
