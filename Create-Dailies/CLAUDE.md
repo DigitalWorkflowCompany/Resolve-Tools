@@ -79,7 +79,8 @@ local disp = bmd.UIDispatcher(ui)
 - Audio sync: `mediaPool:AutoSyncAudio(clipsToSync, syncSettings)` where syncSettings includes:
   - `[resolve.AUDIO_SYNC_MODE] = resolve.AUDIO_SYNC_TIMECODE`
   - `[resolve.AUDIO_SYNC_RETAIN_VIDEO_METADATA] = true`
-  - `[resolve.AUDIO_SYNC_RETAIN_EMBEDDED_AUDIO] = false`
+  - `[resolve.AUDIO_SYNC_RETAIN_EMBEDDED_AUDIO] = false` (creates synced clips WITHOUT embedded audio; does NOT modify source clips)
+- Check for embedded audio: `mediaPoolItem:GetAudioMapping()` returns JSON with `embedded_audio_channels` field
 - Export ALE with CDL: `timeline:Export(filePath, resolve.EXPORT_ALE_CDL, resolve.EXPORT_NONE)`
 - Get clip metadata: `clip:GetClipProperty("Start TC")`, `clip:GetClipProperty("FPS")`
 - Set clip metadata: `mediaPoolItem:SetMetadata("Episode #", value)` - field names must match Resolve UI labels exactly (e.g., "Episode #", "Scene", "Shot", "Take", "Camera #")

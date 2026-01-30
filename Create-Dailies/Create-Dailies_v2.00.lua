@@ -948,15 +948,16 @@ end
 -- CAMERA ROLL PROCESSING FUNCTION
 -- ============================================================================
 
---- Process a single camera roll: import clips, create timeline, apply grades
+--- Process a single camera roll: import clips, optionally create timeline, apply grades
 -- @param cameraRoll table Camera roll configuration (clipPath, binName, timelineName, drxPath)
 -- @param resolve Resolve The Resolve API object
 -- @param project Project The current project
 -- @param mediaPool MediaPool The media pool object
 -- @param mediaStorage MediaStorage The media storage object
 -- @param cdlPath string|nil Path to CDL file (optional)
+-- @param skipTimeline boolean If true, skip timeline creation (for audio sync workflow)
 -- @return boolean True if processing was successful
-local function processCameraRoll(cameraRoll, resolve, project, mediaPool, mediaStorage, cdlPath)
+local function processCameraRoll(cameraRoll, resolve, project, mediaPool, mediaStorage, cdlPath, skipTimeline)
     print("\n=== Processing Camera Roll: " .. cameraRoll.binName .. " ===")
 
     local clipPath = cameraRoll.clipPath
@@ -1052,6 +1053,15 @@ local function processCameraRoll(cameraRoll, resolve, project, mediaPool, mediaS
     end
 
     print("Imported " .. #importedClips .. " clips")
+
+    -- If skipTimeline is true, we're done (audio sync workflow will create timelines later)
+    if skipTimeline then
+        print("Skipping timeline creation (will be created after audio sync)")
+        resolve:OpenPage("media")
+        mediaPool:SetCurrentFolder(rootFolder)
+        print("=== Camera Roll Import Complete: " .. binName .. " ===")
+        return true
+    end
 
     -- ========================================================================
     -- STEP 2: CREATE TIMELINE
@@ -1257,6 +1267,201 @@ local function processCameraRoll(cameraRoll, resolve, project, mediaPool, mediaS
 end
 
 -- ============================================================================
+-- CREATE TIMELINES FROM SYNCED CLIPS
+-- ============================================================================
+
+--- Create a timeline from synced clips for a specific camera roll
+-- @param cameraRoll table Camera roll configuration
+-- @param syncedClips table Array of synced MediaPoolItems
+-- @param resolve Resolve The Resolve API object
+-- @param project Project The current project
+-- @param mediaPool MediaPool The media pool object
+-- @param cdlPath string|nil Path to CDL file (optional)
+-- @return boolean True if timeline was created successfully
+local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath)
+    local binName = cameraRoll.binName
+    local timelineName = cameraRoll.timelineName
+    local drxPath = cameraRoll.drxPath
+
+    print("\n=== Creating Timeline for: " .. binName .. " ===")
+
+    -- Find synced clips that match this roll's clips
+    -- Synced clips should have names like "A001C001..." matching the original clips
+    local rollPrefix = binName:match("^([A-Za-z]+%d+)") or binName
+    local matchingClips = {}
+
+    for _, clip in ipairs(syncedClips) do
+        local clipName = clip:GetName() or ""
+        -- Check if clip name starts with the roll prefix (e.g., A001)
+        if clipName:find(rollPrefix, 1, true) then
+            table.insert(matchingClips, clip)
+        end
+    end
+
+    if #matchingClips == 0 then
+        print("Warning: No synced clips found matching roll " .. binName)
+        return false
+    end
+
+    print("Found " .. #matchingClips .. " synced clips for roll " .. binName)
+
+    -- Sort clips by start timecode
+    table.sort(matchingClips, function(a, b)
+        local tcA = a:GetClipProperty("Start TC") or "00:00:00:00"
+        local tcB = b:GetClipProperty("Start TC") or "00:00:00:00"
+        return timecodeToFrames(tcA, 24) < timecodeToFrames(tcB, 24)
+    end)
+
+    -- Create or find Timelines folder
+    local rootFolder = mediaPool:GetRootFolder()
+    local timelinesFolder = findSubFolderByName(rootFolder, "Timelines")
+
+    if not timelinesFolder then
+        timelinesFolder = mediaPool:AddSubFolder(rootFolder, "Timelines")
+    end
+
+    if timelinesFolder then
+        mediaPool:SetCurrentFolder(timelinesFolder)
+    end
+
+    -- Create timeline
+    print("Creating timeline: " .. timelineName)
+    local newTimeline = mediaPool:CreateTimelineFromClips(timelineName, matchingClips)
+
+    if not newTimeline then
+        print("CreateTimelineFromClips failed, trying fallback...")
+        newTimeline = mediaPool:CreateEmptyTimeline(timelineName)
+        if newTimeline then
+            project:SetCurrentTimeline(newTimeline)
+            mediaPool:AppendToTimeline(matchingClips)
+        end
+    end
+
+    if not newTimeline then
+        print("Error: Failed to create timeline for " .. binName)
+        return false
+    end
+
+    project:SetCurrentTimeline(newTimeline)
+    print("Created timeline: " .. timelineName)
+
+    -- Get timeline items
+    local timelineItems = {}
+    local trackCount = newTimeline:GetTrackCount("video")
+    for track = 1, trackCount do
+        local items = newTimeline:GetItemListInTrack("video", track)
+        if items then
+            for _, item in ipairs(items) do
+                table.insert(timelineItems, item)
+            end
+        end
+    end
+
+    print("Timeline has " .. #timelineItems .. " clips")
+
+    -- Apply DRX if specified
+    if drxPath and drxPath ~= "" then
+        local file = io.open(drxPath, "r")
+        if file then
+            file:close()
+            resolve:OpenPage("color")
+
+            print("Applying DRX grades...")
+            local successCount = 0
+
+            for _, timelineItem in ipairs(timelineItems) do
+                local nodeGraph = timelineItem:GetNodeGraph()
+                if nodeGraph then
+                    local success = nodeGraph:ApplyGradeFromDRX(drxPath, 0)
+                    if success then
+                        successCount = successCount + 1
+                    end
+                end
+            end
+
+            print("DRX applied to " .. successCount .. " clips")
+        end
+    end
+
+    -- Apply CDL if specified
+    if cdlPath and cdlPath ~= "" then
+        project:RefreshLUTList()
+
+        local cdlData = nil
+        local fileExt = cdlPath:match("%.([^%.]+)$")
+
+        if fileExt then
+            fileExt = fileExt:lower()
+            if fileExt == "ccc" then
+                cdlData = parseCCC(cdlPath)
+            elseif fileExt == "edl" then
+                cdlData = parseEDL(cdlPath)
+            end
+        end
+
+        if cdlData then
+            resolve:OpenPage("color")
+            local appliedCount = 0
+
+            for _, clip in ipairs(timelineItems) do
+                local clipName = clip:GetName()
+                local cdlEntry = nil
+                local matchedName = nil
+
+                -- Try exact match
+                if cdlData[clipName] then
+                    cdlEntry = cdlData[clipName]
+                    matchedName = clipName
+                else
+                    -- Try without extension
+                    local clipNameNoExt = clipName:match("(.+)%.[^.]+$") or clipName
+                    if cdlData[clipNameNoExt] then
+                        cdlEntry = cdlData[clipNameNoExt]
+                        matchedName = clipNameNoExt
+                    else
+                        -- Try fuzzy match
+                        for cdlName, cdl in pairs(cdlData) do
+                            if clipName:find(cdlName, 1, true) or cdlName:find(clipName, 1, true) then
+                                cdlEntry = cdl
+                                matchedName = cdlName
+                                break
+                            end
+                        end
+                    end
+                end
+
+                if cdlEntry then
+                    local success = applyCDL(clip, cdlEntry)
+                    if success then
+                        appliedCount = appliedCount + 1
+                    end
+                    applyMetadata(clip, cdlEntry)
+
+                    if cdlEntry.lut then
+                        local lutAbsolutePath, lutRelativePath = searchForLUT(cdlEntry.lut)
+                        if lutAbsolutePath then
+                            local nodeGraph = clip:GetNodeGraph()
+                            local numNodes = nodeGraph and nodeGraph:GetNumNodes() or 0
+                            if numNodes >= 2 then
+                                local lutSuccess = clip:SetLUT(2, lutRelativePath)
+                                if not lutSuccess then
+                                    clip:SetLUT(2, lutAbsolutePath)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            print("CDLs applied to " .. appliedCount .. " of " .. #timelineItems .. " clips")
+        end
+    end
+
+    print("=== Timeline Complete: " .. binName .. " ===")
+    return true
+end
+
+-- ============================================================================
 -- MAIN DAILIES CREATION FUNCTION
 -- ============================================================================
 
@@ -1293,12 +1498,19 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
     local successCount = 0
     local failCount = 0
 
+    -- Determine if we should skip timeline creation (when audio sync is enabled)
+    local skipTimeline = (audioPath and audioPath ~= "" and syncAudio)
+
+    if skipTimeline then
+        print("\nAudio sync enabled - timelines will be created AFTER audio sync")
+    end
+
     for i, cameraRoll in ipairs(cameraRolls) do
         print("\n" .. string.rep("=", 70))
-        print("PROCESSING CAMERA ROLL " .. i .. " OF " .. #cameraRolls)
+        print("IMPORTING CAMERA ROLL " .. i .. " OF " .. #cameraRolls)
         print(string.rep("=", 70))
 
-        local success = processCameraRoll(cameraRoll, resolve, project, mediaPool, mediaStorage, cdlPath)
+        local success = processCameraRoll(cameraRoll, resolve, project, mediaPool, mediaStorage, cdlPath, skipTimeline)
 
         if success then
             successCount = successCount + 1
@@ -1317,25 +1529,49 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
 
         local audioFiles = scanAudioRecursive(mediaStorage, audioPath, {}, 0)
 
-        if audioFiles and #audioFiles > 0 then
-            local rootFolder = mediaPool:GetRootFolder()
-            local audioFolder = findSubFolderByName(rootFolder, "Audio")
+        if not audioFiles or #audioFiles == 0 then
+            print("Error: No audio files found in " .. audioPath)
+        else
+            print("Found " .. #audioFiles .. " audio files")
 
-            if not audioFolder then
-                audioFolder = mediaPool:AddSubFolder(rootFolder, "Audio")
+            local rootFolder = mediaPool:GetRootFolder()
+
+            -- Step 1: Create temporary Sync bin for the sync operation
+            print("\nCreating temporary Sync bin...")
+            local syncFolder = findSubFolderByName(rootFolder, "Sync")
+            if syncFolder then
+                -- Delete existing Sync folder contents or use it
+                print("Using existing 'Sync' bin")
+            else
+                syncFolder = mediaPool:AddSubFolder(rootFolder, "Sync")
+                if syncFolder then
+                    print("Created 'Sync' bin")
+                else
+                    print("Error: Failed to create 'Sync' bin")
+                end
             end
 
-            if audioFolder then
-                mediaPool:SetCurrentFolder(audioFolder)
+            if syncFolder then
+                -- Step 2: Import audio files directly into Sync bin
+                mediaPool:SetCurrentFolder(syncFolder)
 
+                print("\nImporting audio files into Sync bin...")
                 local importedAudioClips = mediaStorage:AddItemListToMediaPool(audioFiles)
 
-                if importedAudioClips and #importedAudioClips > 0 then
-                    -- Collect video clips for sync
-                    local allVideoClips = {}
+                if not importedAudioClips or #importedAudioClips == 0 then
+                    print("Error: Failed to import audio files")
+                else
+                    print("Imported " .. #importedAudioClips .. " audio clips")
+
+                    -- Step 3: Collect video clips from OCF and track their source folders
+                    print("\nCollecting video clips from OCF bins...")
+                    local videoClipInfo = {}  -- {clip, sourceFolder}
+                    local clipsWithEmbeddedAudio = 0
                     local ocfFolder = findSubFolderByName(rootFolder, "OCF")
 
-                    if ocfFolder then
+                    if not ocfFolder then
+                        print("Error: OCF folder not found in Media Pool")
+                    else
                         local cameraFolders = ocfFolder:GetSubFolderList()
                         if cameraFolders then
                             for _, camFolder in ipairs(cameraFolders) do
@@ -1345,7 +1581,19 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                                         local clipsInRoll = rollFolder:GetClipList()
                                         if clipsInRoll then
                                             for _, clip in ipairs(clipsInRoll) do
-                                                table.insert(allVideoClips, clip)
+                                                table.insert(videoClipInfo, {
+                                                    clip = clip,
+                                                    sourceFolder = rollFolder
+                                                })
+
+                                                -- Check for embedded audio
+                                                local audioMapping = clip:GetAudioMapping()
+                                                if audioMapping then
+                                                    local embeddedChannels = audioMapping:match('"embedded_audio_channels"%s*:%s*(%d+)')
+                                                    if embeddedChannels and tonumber(embeddedChannels) > 0 then
+                                                        clipsWithEmbeddedAudio = clipsWithEmbeddedAudio + 1
+                                                    end
+                                                end
                                             end
                                         end
                                     end
@@ -1354,7 +1602,47 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                         end
                     end
 
-                    if #allVideoClips > 0 then
+                    print("Found " .. #videoClipInfo .. " video clips in OCF")
+                    if clipsWithEmbeddedAudio > 0 then
+                        print("Note: " .. clipsWithEmbeddedAudio .. " video clips have embedded audio")
+                        print("      Embedded audio will NOT be retained in synced clips")
+                    end
+
+                    if #videoClipInfo == 0 then
+                        print("Error: No video clips found in OCF bins for audio sync")
+                    else
+                        -- Log sample timecodes for debugging
+                        print("\nSample video clip timecodes:")
+                        for i = 1, math.min(3, #videoClipInfo) do
+                            local info = videoClipInfo[i]
+                            local startTC = info.clip:GetClipProperty("Start TC") or "Unknown"
+                            local clipName = info.clip:GetName() or "Unknown"
+                            print("  " .. clipName .. " - Start TC: " .. startTC)
+                        end
+
+                        print("\nSample audio clip timecodes:")
+                        for i = 1, math.min(3, #importedAudioClips) do
+                            local clip = importedAudioClips[i]
+                            local startTC = clip:GetClipProperty("Start TC") or "Unknown"
+                            local clipName = clip:GetName() or "Unknown"
+                            print("  " .. clipName .. " - Start TC: " .. startTC)
+                        end
+
+                        -- Step 4: Move video clips to Sync bin
+                        print("\nMoving video clips to Sync bin...")
+                        local allVideoClips = {}
+                        for _, info in ipairs(videoClipInfo) do
+                            table.insert(allVideoClips, info.clip)
+                        end
+
+                        local moveSuccess = mediaPool:MoveClips(allVideoClips, syncFolder)
+                        if moveSuccess then
+                            print("Moved " .. #allVideoClips .. " video clips to Sync bin")
+                        else
+                            print("Warning: Failed to move video clips to Sync bin")
+                        end
+
+                        -- Step 5: Perform audio sync (all clips now in same bin)
                         local clipsToSync = {}
                         for _, clip in ipairs(allVideoClips) do
                             table.insert(clipsToSync, clip)
@@ -1369,13 +1657,96 @@ local function createDailies(cameraRolls, cdlPath, audioPath, syncAudio)
                             [resolve.AUDIO_SYNC_RETAIN_EMBEDDED_AUDIO] = false
                         }
 
-                        print("Syncing " .. #allVideoClips .. " video + " .. #importedAudioClips .. " audio clips...")
+                        print("\nStarting audio sync...")
+                        print("  Mode: Timecode matching")
+                        print("  Retain video metadata: Yes")
+                        print("  Retain embedded audio: No")
+                        print("  Clips to sync: " .. #clipsToSync .. " (" .. #allVideoClips .. " video + " .. #importedAudioClips .. " audio)")
+
                         local syncSuccess = mediaPool:AutoSyncAudio(clipsToSync, syncSettings)
 
                         if syncSuccess then
-                            print("Audio sync completed!")
+                            print("\nAudio sync completed successfully!")
+
+                            -- Step 6: Move original video clips back to their source folders
+                            print("\nMoving original video clips back to OCF bins...")
+                            for _, info in ipairs(videoClipInfo) do
+                                mediaPool:MoveClips({info.clip}, info.sourceFolder)
+                            end
+                            print("Restored video clips to original locations")
+
+                            -- Step 7: Create OSF bin and move original audio clips there
+                            local osfFolder = findSubFolderByName(rootFolder, "OSF")
+                            if not osfFolder then
+                                osfFolder = mediaPool:AddSubFolder(rootFolder, "OSF")
+                            end
+                            if osfFolder then
+                                print("\nMoving original audio clips to OSF bin...")
+                                mediaPool:MoveClips(importedAudioClips, osfFolder)
+                                print("Moved audio clips to OSF bin")
+                            end
+
+                            -- Step 8: Get synced clips from Sync bin and create timelines
+                            print("\n" .. string.rep("=", 70))
+                            print("=== CREATING TIMELINES FROM SYNCED CLIPS ===")
+                            print(string.rep("=", 70))
+
+                            local syncedClips = syncFolder:GetClipList()
+                            if syncedClips and #syncedClips > 0 then
+                                -- Filter to only include synced clips (not original clips)
+                                -- Synced clips typically have linked audio
+                                local actualSyncedClips = {}
+                                for _, clip in ipairs(syncedClips) do
+                                    local audioMapping = clip:GetAudioMapping()
+                                    if audioMapping then
+                                        local linkedAudio = audioMapping:match('"linked_audio"')
+                                        if linkedAudio then
+                                            table.insert(actualSyncedClips, clip)
+                                        end
+                                    end
+                                end
+
+                                if #actualSyncedClips > 0 then
+                                    print("Found " .. #actualSyncedClips .. " synced clips")
+
+                                    -- Create timeline for each camera roll
+                                    for _, cameraRoll in ipairs(cameraRolls) do
+                                        createTimelineFromSyncedClips(cameraRoll, actualSyncedClips, resolve, project, mediaPool, cdlPath)
+                                    end
+                                else
+                                    print("Warning: No synced clips found with linked audio")
+                                    print("Using all clips from Sync bin...")
+                                    for _, cameraRoll in ipairs(cameraRolls) do
+                                        createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, project, mediaPool, cdlPath)
+                                    end
+                                end
+                            else
+                                print("Warning: No clips found in Sync bin")
+                            end
+
+                            resolve:OpenPage("media")
                         else
-                            print("Audio sync failed")
+                            print("\nError: Audio sync failed")
+                            print("Possible causes:")
+                            print("  - Video and audio timecodes do not overlap")
+                            print("  - Clips have incompatible frame rates")
+                            print("  - No matching timecode found between video and audio")
+
+                            -- Move video clips back even if sync failed
+                            print("\nMoving video clips back to OCF bins...")
+                            for _, info in ipairs(videoClipInfo) do
+                                mediaPool:MoveClips({info.clip}, info.sourceFolder)
+                            end
+                            print("Restored video clips to original locations")
+
+                            -- Move audio to OSF bin
+                            local osfFolder = findSubFolderByName(rootFolder, "OSF")
+                            if not osfFolder then
+                                osfFolder = mediaPool:AddSubFolder(rootFolder, "OSF")
+                            end
+                            if osfFolder then
+                                mediaPool:MoveClips(importedAudioClips, osfFolder)
+                            end
                         end
                     end
                 end
@@ -1807,7 +2178,156 @@ function win.On.MainTabs.CurrentChanged(ev)
     itm.MainStack.CurrentIndex = ev.Index
 end
 
---- Detect numbered camera roll subdirectories in a parent folder
+--- Check if a folder name matches camera roll naming pattern
+-- Roll names are typically: A001, B002, A_001, A001R1AB
+-- This should NOT match clip names like A001C001, A001_C001
+-- @param folderName string The folder name to check
+-- @return boolean True if it matches camera roll pattern
+local function isCameraRollFolder(folderName)
+    -- First check: must start with letter(s) + optional separator + 3+ digits
+    if not folderName:match("^[A-Za-z]+[_%-]?%d%d%d") then
+        return false
+    end
+
+    -- Exclude clip folders: these have "C" followed by digits after the roll number
+    -- Examples to exclude: A001C001, A001_C001, A001C001_xxxxxx
+    -- But allow: A001, A001R1AB, A001_
+    if folderName:match("^[A-Za-z]+[_%-]?%d%d%d+[_%-]?[Cc]%d") then
+        return false
+    end
+
+    return true
+end
+
+--- Check if a file is a video media file
+-- @param fileName string The filename to check
+-- @return boolean True if it's a video file
+local function isVideoMediaFile(fileName)
+    local lowerName = fileName:lower()
+    return lowerName:match("%.mov$") or lowerName:match("%.mxf$") or
+           lowerName:match("%.r3d$") or lowerName:match("%.braw$") or
+           lowerName:match("%.ari$") or lowerName:match("%.arx$") or
+           lowerName:match("%.mp4$") or lowerName:match("%.avi$") or
+           lowerName:match("%.dng$") or lowerName:match("%.cri$")
+end
+
+--- Check if a folder contains video media files directly
+-- @param mediaStorage MediaStorage The media storage object
+-- @param folderPath string Path to check
+-- @return boolean True if folder contains video files directly
+local function folderContainsMediaDirect(mediaStorage, folderPath)
+    local files = mediaStorage:GetFileList(folderPath)
+    if not files or #files == 0 then
+        return false
+    end
+
+    for _, file in ipairs(files) do
+        local fileName = file:match("([^/]+)$") or file
+        if isVideoMediaFile(fileName) then
+            return true
+        end
+    end
+
+    return false
+end
+
+--- Recursively check if a folder or any of its subfolders contain video media
+-- @param mediaStorage MediaStorage The media storage object
+-- @param folderPath string Path to check
+-- @param depth number Current depth (to prevent infinite recursion)
+-- @return boolean True if media found anywhere inside
+local function folderContainsMediaRecursive(mediaStorage, folderPath, depth)
+    depth = depth or 0
+    if depth > 10 then
+        return false
+    end
+
+    -- Check this folder directly
+    if folderContainsMediaDirect(mediaStorage, folderPath) then
+        return true
+    end
+
+    -- Check subfolders
+    local subFolders = mediaStorage:GetSubFolderList(folderPath)
+    if subFolders then
+        for _, subFolder in ipairs(subFolders) do
+            local subPath
+            if subFolder:sub(1, 1) == "/" or subFolder:sub(2, 2) == ":" then
+                subPath = subFolder
+            else
+                subPath = folderPath .. "/" .. subFolder
+            end
+            if folderContainsMediaRecursive(mediaStorage, subPath, depth + 1) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+--- Recursively detect camera roll folders across multiple directory levels
+-- When a folder matches the roll pattern AND contains media (directly or in subfolders),
+-- it is added as a roll and we do NOT recurse into it (to avoid detecting clip folders as rolls)
+-- @param mediaStorage MediaStorage The media storage object
+-- @param basePath string Path to scan
+-- @param detectedRolls table Table to accumulate found rolls
+-- @param depth number Current recursion depth
+-- @param maxDepth number Maximum recursion depth (default 10)
+-- @return table Array of detected rolls
+local function detectCameraRollsRecursive(mediaStorage, basePath, detectedRolls, depth, maxDepth)
+    detectedRolls = detectedRolls or {}
+    depth = depth or 0
+    maxDepth = maxDepth or 10
+
+    if depth > maxDepth then
+        return detectedRolls
+    end
+
+    local indent = string.rep("  ", depth)
+    local subFolders = mediaStorage:GetSubFolderList(basePath)
+
+    if not subFolders or #subFolders == 0 then
+        return detectedRolls
+    end
+
+    for _, subFolder in ipairs(subFolders) do
+        local folderName
+        local folderPath
+
+        if subFolder:sub(1, 1) == "/" or subFolder:sub(2, 2) == ":" then
+            folderPath = subFolder
+            folderName = subFolder:match("([^/]+)$")
+        else
+            folderPath = basePath .. "/" .. subFolder
+            folderName = subFolder
+        end
+
+        -- Check if this folder matches camera roll naming pattern (not clip pattern)
+        if isCameraRollFolder(folderName) then
+            -- Check if it contains media ANYWHERE inside (directly or in subfolders)
+            if folderContainsMediaRecursive(mediaStorage, folderPath, 0) then
+                print(indent .. "  Detected roll: " .. folderName)
+                table.insert(detectedRolls, {
+                    name = folderName,
+                    path = folderPath
+                })
+                -- DO NOT recurse into this folder - it's a complete roll
+            else
+                -- Matches pattern but no media anywhere inside - skip it
+                print(indent .. "  Skipping: " .. folderName .. " (no media found)")
+            end
+        else
+            -- Folder doesn't match roll pattern, recurse to check for rolls inside
+            print(indent .. "  Scanning: " .. folderName)
+            detectCameraRollsRecursive(mediaStorage, folderPath, detectedRolls, depth + 1, maxDepth)
+        end
+    end
+
+    return detectedRolls
+end
+
+--- Detect numbered camera roll subdirectories across multiple directory levels
 -- @param parentPath string Path to parent camera folder
 -- @return table|nil Array of detected rolls
 local function detectCameraRolls(parentPath)
@@ -1819,38 +2339,19 @@ local function detectCameraRolls(parentPath)
     local mediaStorage = resolve:GetMediaStorage()
     local detectedRolls = {}
 
-    local subFolders = mediaStorage:GetSubFolderList(parentPath)
+    print("\n=== Scanning for camera rolls ===")
+    print("Root path: " .. parentPath)
+    print("Scanning multiple directory levels...\n")
 
-    if not subFolders or #subFolders == 0 then
-        return detectedRolls
-    end
+    detectCameraRollsRecursive(mediaStorage, parentPath, detectedRolls, 0, 10)
 
-    print("\nScanning for camera rolls in: " .. parentPath)
-
-    for _, subFolder in ipairs(subFolders) do
-        local folderName
-        local folderPath
-
-        if subFolder:sub(1, 1) == "/" or subFolder:sub(2, 2) == ":" then
-            folderPath = subFolder
-            folderName = subFolder:match("([^/]+)$")
-        else
-            folderPath = parentPath .. "/" .. subFolder
-            folderName = subFolder
-        end
-
-        if folderName:match("^[A-Za-z]+[_%-]?%d%d%d+") then
-            print("  Detected roll: " .. folderName)
-            table.insert(detectedRolls, {
-                name = folderName,
-                path = folderPath
-            })
-        end
-    end
-
+    -- Sort by name
     table.sort(detectedRolls, function(a, b)
         return a.name < b.name
     end)
+
+    print("\n=== Scan complete ===")
+    print("Found " .. #detectedRolls .. " camera rolls")
 
     return detectedRolls
 end
