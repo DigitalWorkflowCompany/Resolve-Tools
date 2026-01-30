@@ -1344,33 +1344,41 @@ local function createTimelineFromSyncedClips(cameraRoll, syncedClips, resolve, p
     end
     print("  Audio tracks: " .. audioTrackDesc)
 
-    -- Find synced clips that match this roll's clips
-    -- Synced clips should have names like "A001C001..." matching the original clips
-    local rollPrefix = binName:match("^([A-Za-z]+%d+)") or binName
-    print("  Roll prefix for matching: '" .. rollPrefix .. "'")
-
+    -- For master timelines, use all clips without filtering
+    -- For roll timelines, filter by roll prefix
     local matchingClips = {}
+    local isMasterTimeline = binName:find("^MasterTimeline") ~= nil
 
-    for _, clip in ipairs(syncedClips) do
-        local clipName = clip:GetName() or ""
-        -- Check if clip name contains the roll prefix (e.g., A001)
-        if clipName:find(rollPrefix, 1, true) then
-            table.insert(matchingClips, clip)
+    if isMasterTimeline then
+        -- Master timeline: use all provided clips
+        matchingClips = syncedClips
+        print("  Master timeline mode: using all " .. #matchingClips .. " clips")
+    else
+        -- Roll timeline: filter by roll prefix
+        local rollPrefix = binName:match("^([A-Za-z]+%d+)") or binName
+        print("  Roll prefix for matching: '" .. rollPrefix .. "'")
+
+        for _, clip in ipairs(syncedClips) do
+            local clipName = clip:GetName() or ""
+            -- Check if clip name contains the roll prefix (e.g., A001)
+            if clipName:find(rollPrefix, 1, true) then
+                table.insert(matchingClips, clip)
+            end
         end
-    end
 
-    print("  Matching clips found: " .. #matchingClips)
+        print("  Matching clips found: " .. #matchingClips)
 
-    if #matchingClips == 0 then
-        print("Warning: No clips found matching roll prefix '" .. rollPrefix .. "'")
-        print("Available clip names:")
-        for i, clip in ipairs(syncedClips) do
-            print("  " .. i .. ": " .. (clip:GetName() or "Unknown"))
+        if #matchingClips == 0 then
+            print("Warning: No clips found matching roll prefix '" .. rollPrefix .. "'")
+            print("Available clip names:")
+            for i, clip in ipairs(syncedClips) do
+                print("  " .. i .. ": " .. (clip:GetName() or "Unknown"))
+            end
+            return false
         end
-        return false
-    end
 
-    print("Found " .. #matchingClips .. " synced clips for roll " .. binName)
+        print("Found " .. #matchingClips .. " synced clips for roll " .. binName)
+    end
 
     -- Sort clips by start timecode
     table.sort(matchingClips, function(a, b)
@@ -2808,19 +2816,32 @@ function win.On.QuickAddCameraBtn.Clicked(ev)
         return
     end
 
-    print("\n" .. string.rep("=", 50))
-    print("Detected " .. #detectedRolls .. " camera rolls")
-    print("Now select a DRX grade file to apply to all rolls")
-    print("(Press Cancel/Escape to skip DRX grading)")
-    print(string.rep("=", 50))
+    print("\n")
+    print(string.rep("*", 60))
+    print("*" .. string.rep(" ", 58) .. "*")
+    print("*   DETECTED " .. #detectedRolls .. " CAMERA ROLLS" .. string.rep(" ", 38 - tostring(#detectedRolls):len()) .. "*")
+    print("*" .. string.rep(" ", 58) .. "*")
+    print("*   NEXT: SELECT DRX GRADE FILE" .. string.rep(" ", 26) .. "*")
+    print("*   (This will apply to ALL imported rolls)" .. string.rep(" ", 14) .. "*")
+    print("*" .. string.rep(" ", 58) .. "*")
+    print("*   Press CANCEL to skip DRX grading" .. string.rep(" ", 21) .. "*")
+    print("*" .. string.rep(" ", 58) .. "*")
+    print(string.rep("*", 60))
+    print("")
 
-    local drxPath = fu:RequestFile("Select DRX Grade File for ALL Rolls (Cancel to Skip)")
+    local drxPath = fu:RequestFile(">>> SELECT DRX GRADE FILE FOR ALL ROLLS <<< (Cancel to Skip)")
     local drxPathStr = drxPath or ""
 
+    print("")
     if drxPathStr ~= "" then
-        print("DRX selected: " .. drxPathStr)
+        print(string.rep("=", 60))
+        print("DRX FILE SELECTED:")
+        print("  " .. drxPathStr)
+        print(string.rep("=", 60))
     else
-        print("No DRX file selected - skipping grade application")
+        print(string.rep("-", 60))
+        print("NO DRX FILE SELECTED - Grades will not be applied")
+        print(string.rep("-", 60))
     end
 
     for _, roll in ipairs(detectedRolls) do
